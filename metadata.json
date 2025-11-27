@@ -1,0 +1,5 @@
+{
+  "name": "NovelWeaver AI",
+  "description": "An intelligent webnovel reader that uses Gemini AI to discover chapter lists and aggregate story content into a clean, readable format with bulk export capabilities.",
+  "requestFramePermissions": []
+}
