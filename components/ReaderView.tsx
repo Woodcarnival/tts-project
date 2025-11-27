@@ -2,7 +2,7 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Chapter } from '../types';
-import { Download, ExternalLink, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
+import { Download, ExternalLink, ChevronLeft, ChevronRight, RefreshCw, BookOpen } from 'lucide-react';
 
 interface ReaderViewProps {
   chapter: Chapter | null;
@@ -17,10 +17,12 @@ const ReaderView: React.FC<ReaderViewProps> = ({ chapter, onNavigate, hasPrev, h
     return (
       <div className="flex flex-col items-center justify-center h-full text-gray-500 p-10 bg-gray-900/50 rounded-xl border border-dashed border-gray-700">
         <div className="mb-4 p-4 bg-gray-800 rounded-full">
-          <Download className="w-8 h-8 text-gray-600" />
+          <BookOpen className="w-8 h-8 text-blue-500" />
         </div>
-        <p className="text-lg font-medium">Select a chapter to read</p>
-        <p className="text-sm opacity-60">Use "Fetch All" to download up to 100 chapters at once</p>
+        <p className="text-lg font-medium text-gray-300">Start Reading</p>
+        <p className="text-sm opacity-60 max-w-sm text-center mt-2">
+          Select a chapter from the list or use the <span className="text-yellow-500 font-bold">Download</span> button to grab 100 chapters at once.
+        </p>
       </div>
     );
   }
@@ -42,12 +44,12 @@ const ReaderView: React.FC<ReaderViewProps> = ({ chapter, onNavigate, hasPrev, h
     <div className="bg-gray-900 rounded-xl border border-gray-800 shadow-2xl flex flex-col h-[calc(100vh-140px)]">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-gray-900/95 backdrop-blur rounded-t-xl sticky top-0 z-10">
-        <div className="flex flex-col">
+        <div className="flex flex-col min-w-0 mr-4">
           <span className="text-xs text-blue-400 font-bold tracking-wider uppercase">Chapter {chapter.number}</span>
-          <h2 className="text-lg font-bold text-white truncate max-w-md">{chapter.title}</h2>
+          <h2 className="text-lg font-bold text-white truncate">{chapter.title}</h2>
         </div>
         
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
            {chapter.sourceUrl && (
              <a 
               href={chapter.sourceUrl} 
@@ -63,7 +65,7 @@ const ReaderView: React.FC<ReaderViewProps> = ({ chapter, onNavigate, hasPrev, h
             onClick={handleDownload}
             disabled={!chapter.content}
             className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors disabled:opacity-50"
-            title="Download Markdown"
+            title="Download Chapter"
           >
             <Download className="w-5 h-5" />
           </button>
@@ -80,17 +82,23 @@ const ReaderView: React.FC<ReaderViewProps> = ({ chapter, onNavigate, hasPrev, h
               <div className="h-4 bg-gray-800 rounded w-5/6"></div>
               <div className="h-4 bg-gray-800 rounded w-full"></div>
               <div className="h-32 bg-gray-800 rounded w-full mt-8"></div>
+              <p className="text-center text-sm text-blue-400/50 mt-4">Searching novel databases...</p>
             </div>
           ) : chapter.status === 'error' ? (
-            <div className="flex flex-col items-center justify-center p-8 bg-red-900/10 border border-red-900/50 rounded-lg text-center">
-              <p className="text-red-300 font-medium mb-2">Failed to load chapter content</p>
-              <p className="text-red-400/70 text-sm mb-4">{chapter.errorMessage || "Network or content retrieval error."}</p>
+            <div className="flex flex-col items-center justify-center p-8 bg-red-900/10 border border-red-900/50 rounded-lg text-center mt-10">
+              <div className="bg-red-900/20 p-3 rounded-full mb-3">
+                 <RefreshCw className="w-6 h-6 text-red-400" />
+              </div>
+              <p className="text-red-300 font-medium mb-2">Content Unavailable</p>
+              <p className="text-red-400/70 text-sm mb-6 max-w-md mx-auto">
+                {chapter.errorMessage || "We couldn't retrieve the text for this chapter. The source might be down or protected."}
+              </p>
               {onRetry && (
                 <button 
                   onClick={onRetry}
-                  className="flex items-center gap-2 px-4 py-2 bg-red-900/30 hover:bg-red-900/50 text-red-200 rounded-lg transition-colors"
+                  className="px-5 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors font-medium text-sm"
                 >
-                  <RefreshCw className="w-4 h-4" /> Retry
+                  Try Again
                 </button>
               )}
             </div>

@@ -11,7 +11,8 @@ export interface Chapter {
 
 export interface NovelState {
   title: string;
-  author?: string;
+  author: string;
+  totalChaptersEstimate: number;
   chapters: Chapter[];
   isFetchingList: boolean;
   currentChapterId: string | null;

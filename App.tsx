@@ -1,80 +1,96 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, BookOpen, DownloadCloud, AlertTriangle, Book, RefreshCw, XCircle } from 'lucide-react';
-import { fetchChapterList, fetchChapterContent } from './services/geminiService';
+import { Search, Book, Menu, XCircle, AlertTriangle, FileDown } from 'lucide-react';
+import { fetchNovelMetadata, fetchChapterContent } from './services/geminiService';
 import { Chapter, NovelState } from './types';
 import ChapterListItem from './components/ChapterListItem';
 import ReaderView from './components/ReaderView';
+import DownloadModal from './components/DownloadModal';
 
 const App: React.FC = () => {
   const [searchInput, setSearchInput] = useState('');
   const [state, setState] = useState<NovelState>({
     title: '',
+    author: '',
+    totalChaptersEstimate: 0,
     chapters: [],
     isFetchingList: false,
     currentChapterId: null,
   });
-  const [isBulkFetching, setIsBulkFetching] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // Ref to control bulk fetch cancellation
-  const abortBulkFetchRef = useRef(false);
+  const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number } | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const abortFetchRef = useRef(false);
 
-  // Scroll to selected chapter content
+  // Auto-load selected chapter
   useEffect(() => {
     if (state.currentChapterId) {
       const chapter = state.chapters.find(c => c.id === state.currentChapterId);
-      // Load if no content and not loading. Allow retry if status is error.
-      if (chapter && !chapter.content && chapter.status !== 'loading') {
+      if (chapter && !chapter.content && chapter.status !== 'loading' && chapter.status !== 'error') {
         loadChapterContent(chapter);
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.currentChapterId]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    // Input Validation
-    if (!searchInput.trim()) {
+    const trimmedInput = searchInput.trim();
+    if (!trimmedInput) {
       setErrorMsg("Please enter a novel name.");
       return;
     }
-    if (searchInput.trim().length < 2) {
+    if (trimmedInput.length < 2) {
       setErrorMsg("Novel name is too short. Please enter a valid name.");
       return;
     }
 
-    setState(prev => ({ ...prev, isFetchingList: true, title: searchInput, chapters: [], currentChapterId: null }));
+    setState(prev => ({ 
+      ...prev, 
+      isFetchingList: true, 
+      title: trimmedInput, 
+      author: '',
+      chapters: [], 
+      currentChapterId: null 
+    }));
     setErrorMsg(null);
-    abortBulkFetchRef.current = false; // Reset abort flag
-    setIsBulkFetching(false);
+    abortFetchRef.current = false;
 
     try {
-      const titles = await fetchChapterList(searchInput);
-      const newChapters: Chapter[] = titles.map((title, index) => ({
+      const metadata = await fetchNovelMetadata(trimmedInput);
+      
+      if (!metadata.exists) {
+        throw new Error("Novel not found on supported sites (readernovel, lightnovelpub, novelbin).");
+      }
+
+      const totalChapters = metadata.totalChapters || 100;
+      const newChapters: Chapter[] = Array.from({ length: totalChapters }, (_, i) => ({
         id: crypto.randomUUID(),
-        number: index + 1,
-        title,
+        number: i + 1,
+        title: i < metadata.chapterTitles.length ? metadata.chapterTitles[i] : `Chapter ${i + 1}`,
         content: null,
         status: 'pending'
       }));
 
       setState(prev => ({
         ...prev,
+        title: metadata.title,
+        author: metadata.author,
+        totalChaptersEstimate: totalChapters,
         isFetchingList: false,
         chapters: newChapters,
         currentChapterId: newChapters.length > 0 ? newChapters[0].id : null
       }));
     } catch (error: any) {
       console.error(error);
-      setErrorMsg(error.message || "Failed to find novel chapters. Please check the name or try again.");
+      setErrorMsg(error.message || "Failed to find novel. Network error or service unavailable.");
       setState(prev => ({ ...prev, isFetchingList: false }));
     }
   };
 
   const loadChapterContent = async (chapter: Chapter) => {
-    // Update status to loading
+    // Optimistically update status
     setState(prev => ({
       ...prev,
       chapters: prev.chapters.map(c => 
@@ -83,85 +99,100 @@ const App: React.FC = () => {
     }));
 
     try {
-      const { content, sourceUrl } = await fetchChapterContent(state.title, chapter.title, chapter.number);
+      // Pass the current placeholder title so the AI knows what to look for roughly
+      const result = await fetchChapterContent(state.title, chapter.number, chapter.title);
       
       setState(prev => ({
         ...prev,
         chapters: prev.chapters.map(c => 
-          c.id === chapter.id ? { ...c, content, status: 'completed', sourceUrl } : c
+          c.id === chapter.id ? { 
+            ...c, 
+            content: result.content, 
+            title: result.title, // Update with real title found in content
+            status: 'completed', 
+            sourceUrl: result.sourceUrl 
+          } : c
         )
       }));
+      return true;
     } catch (error: any) {
-      console.error(error);
+      console.error(`Failed to load Ch ${chapter.number}:`, error);
       setState(prev => ({
         ...prev,
         chapters: prev.chapters.map(c => 
-          c.id === chapter.id ? { ...c, status: 'error', errorMessage: error.message || "Failed to load" } : c
+          c.id === chapter.id ? { ...c, status: 'error', errorMessage: error.message } : c
         )
       }));
+      return false;
     }
   };
 
-  const handleBulkFetch = async () => {
-    if (state.chapters.length === 0) return;
-    setIsBulkFetching(true);
-    abortBulkFetchRef.current = false;
+  const handleDownloadRange = async (start: number, end: number) => {
+    abortFetchRef.current = false;
+    
+    // 1. Identify chapters in range
+    const targetIndices = state.chapters
+      .map((c, idx) => ({ c, idx }))
+      .filter(({ c }) => c.number >= start && c.number <= end);
+    
+    if (targetIndices.length === 0) return;
 
-    // Filter for pending or error chapters (retry errors on bulk fetch)
-    const pendingChapters = state.chapters.filter(c => !c.content);
+    setDownloadProgress({ current: 0, total: targetIndices.length });
 
-    let fetchedCount = 0;
+    // 2. Fetch missing content sequentially to avoid rate limits
+    // We filter for ones that need fetching (pending or error)
+    const toFetch = targetIndices.filter(({ c }) => !c.content);
+    
+    let completedCount = targetIndices.length - toFetch.length;
+    setDownloadProgress({ current: completedCount, total: targetIndices.length });
 
-    for (const chapter of pendingChapters) {
-      // Check cancellation
-      if (abortBulkFetchRef.current) {
-        break;
-      }
+    for (const { c } of toFetch) {
+      if (abortFetchRef.current) break;
       
-      await loadChapterContent(chapter);
-      fetchedCount++;
+      const success = await loadChapterContent(c);
+      if (success) completedCount++;
+      setDownloadProgress({ current: completedCount, total: targetIndices.length });
       
-      // Small delay to be polite
-      if (fetchedCount < pendingChapters.length) {
-          await new Promise(r => setTimeout(r, 800));
-      }
+      // Increased delay to 2000ms to be safe with rate limits
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    // 3. Compile and Download
+    if (!abortFetchRef.current) {
+        generateRangeDownload(start, end);
     }
     
-    setIsBulkFetching(false);
-    abortBulkFetchRef.current = false;
+    setDownloadProgress(null);
   };
 
-  const stopBulkFetch = () => {
-    abortBulkFetchRef.current = true;
-    // UI update handled in the loop exit or manually here if needed immediately
-    // but the state `isBulkFetching` will be set to false at end of loop
-  };
+  const generateRangeDownload = (start: number, end: number) => {
+    const rangeChapters = state.chapters.filter(c => c.number >= start && c.number <= end);
+    const validChapters = rangeChapters.filter(c => c.content); // Only include ones with content
 
-  const handleExportAll = () => {
-    const completedChapters = state.chapters.filter(c => c.content);
-    if (completedChapters.length === 0) {
-        setErrorMsg("No chapters available to export.");
+    if (validChapters.length === 0) {
+        setErrorMsg(`Failed to download any chapters in range ${start}-${end}.`);
         return;
     }
 
-    try {
-      let fullText = `# ${state.title}\n\nGenerated by NovelWeaver AI\n\n`;
-      completedChapters.forEach(c => {
-        fullText += `\n\n## Chapter ${c.number}: ${c.title}\n\n${c.content}\n\n***\n`;
-      });
+    let fullText = `# ${state.title}\n`;
+    if (state.author) fullText += `**Author:** ${state.author}\n`;
+    fullText += `**Chapters:** ${start} - ${end}\n`;
+    fullText += `**Generated by:** NovelWeaver AI\n\n***\n\n`;
 
-      const blob = new Blob([fullText], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${state.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_full.md`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setErrorMsg("Failed to export file.");
-    }
+    // Arrange strictly by chapter number
+    validChapters.sort((a, b) => a.number - b.number).forEach(c => {
+      fullText += `## ${c.title}\n\n${c.content}\n\n***\n\n`;
+    });
+
+    const blob = new Blob([fullText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${state.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_${start}-${end}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const navigateChapter = (direction: 'next' | 'prev') => {
@@ -177,20 +208,16 @@ const App: React.FC = () => {
   const activeChapter = state.chapters.find(c => c.id === state.currentChapterId) || null;
   const activeIndex = state.chapters.findIndex(c => c.id === state.currentChapterId);
 
-  // Count progress
-  const completedCount = state.chapters.filter(c => c.status === 'completed').length;
-  const totalCount = state.chapters.length;
-
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col overflow-hidden">
       {/* Navbar */}
-      <header className="h-16 border-b border-gray-800 bg-gray-950 flex items-center px-6 justify-between shrink-0 z-20">
-        <div className="flex items-center gap-2">
+      <header className="h-16 border-b border-gray-800 bg-gray-950 flex items-center px-4 md:px-6 justify-between shrink-0 z-20">
+        <div className="flex items-center gap-2 md:gap-3">
           <Book className="w-6 h-6 text-blue-500" />
-          <h1 className="text-xl font-bold font-serif tracking-tight hidden md:block">NovelWeaver AI</h1>
+          <h1 className="text-lg md:text-xl font-bold font-serif tracking-tight hidden sm:block">NovelWeaver AI</h1>
         </div>
         
-        <form onSubmit={handleSearch} className="flex-1 max-w-xl mx-4 md:mx-8">
+        <form onSubmit={handleSearch} className="flex-1 max-w-lg mx-4">
           <div className="relative group">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 group-focus-within:text-blue-400 transition-colors" />
             <input
@@ -203,67 +230,35 @@ const App: React.FC = () => {
           </div>
         </form>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
            {state.chapters.length > 0 && (
-             <>
-               {isBulkFetching ? (
-                 <button 
-                    onClick={stopBulkFetch}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border bg-red-900/20 border-red-800 text-red-300 hover:bg-red-900/40 transition-colors"
-                 >
-                   <XCircle className="w-3 h-3" /> Stop
-                 </button>
-               ) : (
-                 <button 
-                    onClick={handleBulkFetch}
-                    disabled={completedCount === totalCount}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-                       completedCount === totalCount
-                        ? 'opacity-50 cursor-not-allowed border-gray-700 text-gray-500'
-                        : 'bg-gray-800 border-gray-700 hover:bg-gray-700 text-gray-300'
-                    }`}
-                 >
-                   <RefreshCw className="w-3 h-3" />
-                   Fetch All
-                 </button>
-               )}
-
-               <button 
-                  onClick={handleExportAll}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors"
-                >
-                  <DownloadCloud className="w-3 h-3" />
-                  <span className="hidden md:inline">Export</span>
-                </button>
-             </>
+             <button 
+                onClick={() => setIsDownloadModalOpen(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold bg-yellow-600 hover:bg-yellow-500 text-white transition-colors shadow-lg shadow-yellow-900/20"
+             >
+               <FileDown className="w-4 h-4" />
+               <span className="hidden md:inline">Download</span>
+             </button>
            )}
         </div>
       </header>
 
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden">
-        {/* Sidebar: Chapter List */}
-        <div className="w-80 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
+        {/* Sidebar */}
+        <div className="w-72 md:w-80 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0 hidden md:flex">
           <div className="p-4 border-b border-gray-800 bg-gray-900 sticky top-0 z-10">
-             <div className="flex justify-between items-center mb-2">
-               <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Chapters</h2>
-               <span className="text-xs bg-gray-800 px-2 py-0.5 rounded-full text-gray-500">{completedCount} / {totalCount}</span>
+             <div className="flex justify-between items-center mb-1">
+               <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Chapter List</h2>
              </div>
-             {state.chapters.length > 0 && (
-               <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
-                 <div 
-                   className={`h-full transition-all duration-500 ${isBulkFetching ? 'bg-blue-400 animate-pulse' : 'bg-blue-500'}`}
-                   style={{ width: `${(completedCount / totalCount) * 100}%` }}
-                 ></div>
-               </div>
-             )}
+             {state.author && <p className="text-xs text-gray-500 truncate mb-2">By {state.author}</p>}
           </div>
           
-          <div className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
+          <div className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin">
              {state.isFetchingList ? (
                <div className="space-y-3 p-2">
-                 {[1, 2, 3, 4, 5, 6, 7, 8].map(i => (
-                   <div key={i} className="h-10 bg-gray-800 animate-pulse rounded-lg"></div>
+                 {[1, 2, 3, 4, 5].map(i => (
+                   <div key={i} className="h-12 bg-gray-800 animate-pulse rounded-lg"></div>
                  ))}
                </div>
              ) : state.chapters.length > 0 ? (
@@ -277,8 +272,8 @@ const App: React.FC = () => {
                ))
              ) : (
                 <div className="flex flex-col items-center justify-center h-40 text-gray-600 text-center px-4 mt-10">
-                  <BookOpen className="w-8 h-8 mb-2 opacity-50" />
-                  <p className="text-sm">Search for a novel to see chapters here.</p>
+                  <Book className="w-8 h-8 mb-2 opacity-30" />
+                  <p className="text-sm">Enter a novel name above to begin.</p>
                 </div>
              )}
           </div>
@@ -289,7 +284,7 @@ const App: React.FC = () => {
           {errorMsg && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-500/90 backdrop-blur text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-3 border border-red-400 animate-in slide-in-from-top-2">
               <AlertTriangle className="w-5 h-5 shrink-0" />
-              <span className="font-medium">{errorMsg}</span>
+              <span className="font-medium text-sm">{errorMsg}</span>
               <button 
                 onClick={() => setErrorMsg(null)} 
                 className="ml-2 hover:bg-white/20 rounded-full p-1"
@@ -304,10 +299,28 @@ const App: React.FC = () => {
             onNavigate={navigateChapter}
             hasPrev={activeIndex > 0}
             hasNext={activeIndex !== -1 && activeIndex < state.chapters.length - 1}
-            onRetry={activeChapter?.status === 'error' ? () => loadChapterContent(activeChapter) : undefined}
+            onRetry={activeChapter?.status === 'error' ? () => loadChapterContent(activeChapter!) : undefined}
           />
         </div>
       </main>
+
+      {/* Download Modal */}
+      <DownloadModal 
+        isOpen={isDownloadModalOpen}
+        onClose={() => {
+           // Allow closing and cancelling download
+           if (downloadProgress) {
+             abortFetchRef.current = true;
+           }
+           setIsDownloadModalOpen(false);
+           setDownloadProgress(null);
+        }}
+        totalChapters={state.totalChaptersEstimate}
+        chapters={state.chapters}
+        onDownloadRange={handleDownloadRange}
+        isDownloading={!!downloadProgress}
+        downloadProgress={downloadProgress}
+      />
     </div>
   );
 };
